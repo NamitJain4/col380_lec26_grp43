@@ -48,6 +48,13 @@ The difficulty is that a \emph{specific DFS order} is a serial object.
 If the serial rule says ``always explore the smallest unvisited neighbour first,'' then the algorithm must know whether the smallest neighbour's entire recursive subtree has finished before it is allowed to explore the next neighbour.
 That decision creates a long dependence chain.
 
+\paragraph{Intuition: Why DFS creates a dependency chain.}
+A useful way to understand this dependence is to think in terms of \emph{unfinished work}. 
+When DFS explores a neighbour \(v\), it is not enough to simply visit \(v\); the algorithm must completely explore the entire subtree rooted at \(v\) before returning to consider another neighbour. 
+This means that the decision to explore the next neighbour is blocked until all recursive calls below the current one are finished. 
+In parallel terms, this creates a strict \emph{serialization constraint}: even if multiple processors are available, they cannot safely proceed to other branches without violating DFS ordering. 
+Thus, the dependency is not just about visiting nodes, but about enforcing a global completion order over recursive subtrees.
+
 \begin{pppitfall}
 \ Starting many recursive calls from the same vertex at the same time does not produce a DFS.
 If a processor explores neighbour \(B\) while another explores neighbour \(C\), the resulting discovery pattern may be a useful parallel traversal, but it is not the same as depth-first exploration from \(B\) followed by backtracking to \(C\).
@@ -156,6 +163,13 @@ These hanging components can then be solved recursively in parallel.
 It acts as the serial backbone of the DFS tree.
 The vertices not on the path are partitioned into \emph{hanging components}, which can be processed recursively.
 \end{ppdefn}
+
+\paragraph{Intuition: Why the spine enables parallelism.}
+The spine path can be viewed as isolating the inherently sequential part of DFS. 
+Instead of trying to parallelize the entire traversal, the algorithm identifies a single path that preserves the depth-first ordering constraint. 
+Once this path is fixed, all remaining vertices lie in subgraphs that are conditionally independent given their attachment to the spine. 
+In other words, the spine acts as a \emph{separator}: it absorbs the global ordering constraints, allowing the hanging components to be explored without interfering with each other. 
+This transformation converts one long sequential dependency into many smaller independent subproblems, which can be solved in parallel.
 
 \subsection{High-Level Algorithm}
 
@@ -277,40 +291,6 @@ A parallel scan or sort-by-edge-id can compact the selected list into unique edg
 ``What is your cheapest outgoing edge?''
 The contraction step then reduces the number of components, often by a constant factor per round.
 \end{ppkey}
-
-\begin{ppprogram}{Borůvka spanning-tree algorithm}{prog:boruvka-full}
-\begin{lstlisting}[language=C]
-boruvka_spanning_tree(Graph G):
-    for each vertex v in parallel:
-        component[v] = v          // single-vertex components
-    T = empty edge set
-
-    while more than one component exists:
-        // Each component finds its cheapest outgoing edge.
-        for each component C in parallel:
-            cheapest[C] = NIL
-            for each edge (u, v, w) with Find(u)==C, Find(v)!=C:
-                if cheapest[C]==NIL or w < weight(cheapest[C]):
-                    cheapest[C] = (u, v, w)
-
-        // Deduplicate: two components may pick the same edge.
-        selected = deduplicate({ cheapest[C] : cheapest[C] != NIL })
-        T = T union selected
-
-        // Contract: merge endpoints of each selected edge.
-        for each edge (u, v) in selected in parallel:
-            union(component, u, v)
-        pointer_jumping(component)    // flatten to roots
-
-    return T
-\end{lstlisting}
-\end{ppprogram}
-
-\begin{ppnote}
-\ Each Borůvka round merges at least two components per selected edge, so the number of components drops by at least half per round.
-Starting from \(n\) singleton components, at most \(O(\log n)\) rounds suffice.
-Combined with \(O(m)\) work per round, total work is \(O(m \log n)\).
-\end{ppnote}
 
 \subsection{Parallel Union--Find with Pointer Jumping}
 \label{sec:union-find-pointer-jumping}
@@ -575,6 +555,14 @@ The global DFS number of spine vertex \(s_k\) is:
 assuming each earlier spine vertex contributes one slot for itself plus its attached block.
 This is exactly the kind of computation prefix sums are meant for.
 
+\paragraph{Intuition: Why prefix sums solve the merge problem.}
+The merge step can be understood as assigning each subtree a contiguous segment in the global DFS order. 
+Conceptually, we can imagine laying out the spine vertices and their attached component blocks in a linear sequence. 
+Each item in this sequence occupies a number of slots equal to its subtree size. 
+The key challenge is to determine where each item starts in this global ordering without processing them one by one. 
+Prefix sums solve exactly this problem: by computing the cumulative sizes of all preceding items, each subtree can independently determine its starting index. 
+This allows all DFS numbers to be assigned in parallel while still preserving the correct depth-first ordering structure.
+
 \begin{figure}[h]
     \centering
     \includegraphics[width=0.92\textwidth]{media/lec26_prefix_merge.png}
@@ -633,54 +621,6 @@ Therefore classification can also serve as a verification step.
 For undirected graphs, every non-tree edge in a correct DFS tree should connect an ancestor and a descendant.
 So in the undirected setting, a cross edge usually indicates that the proposed merge is not a valid DFS tree.
 \end{pppitfall}
-
-\begin{ppnote}
-\ For \emph{directed} graphs the situation differs.
-Cross edges between unrelated subtrees are perfectly legal in a directed DFS, and forward edges (ancestor to proper descendant, skipping intermediate tree edges) also appear.
-The interval test still works: a cross edge \((u,v)\) satisfies \(dfs[v] < dfs[u]\) with \(u\) outside \(v\)'s subtree interval, while a forward edge has \(dfs[u] < dfs[v]\) with \(v\) inside \(u\)'s interval.
-The absence-of-cross-edges rule applies only to undirected DFS.
-\end{ppnote}
-
-\section{Worked Example}
-\label{sec:lec26-worked-example}
-
-\begin{ppexample}
-\ Consider the graph \(G\) with vertices \(\{1,2,3,4,5\}\) and edges
-\(1\text{--}2,\ 2\text{--}3,\ 2\text{--}4,\ 1\text{--}5\) (spanning tree \(S\)) plus the non-tree edge \(3\text{--}5\).
-
-\textbf{Step 1 — Spanning tree.}
-Parallel spanning-tree construction produces \(S = \{1\text{--}2,\ 2\text{--}3,\ 2\text{--}4,\ 1\text{--}5\}\).
-
-\textbf{Step 2 — Spine selection.}
-Euler tour and list ranking compute depths: \(d(1)=0,\ d(2)=1,\ d(3)=2,\ d(4)=2,\ d(5)=1\).
-The deepest leaf is 3 (or 4; break ties consistently).
-Select spine \(P = (s_0{=}1,\ s_1{=}2,\ s_2{=}3)\).
-
-\textbf{Step 3 — Hanging components.}
-Remove \(\{1,2,3\}\).  Two isolated components remain:
-\begin{itemize}
-    \item \(C_1 = \{4\}\): touches spine only at \(s_1{=}2\).  Attach to \(s_1\).
-    \item \(C_2 = \{5\}\): touches spine at \(s_0{=}1\) (via edge \(1\text{--}5\)) and \(s_2{=}3\) (via edge \(3\text{--}5\)).
-          Deepest index is 2, so attach to \(s_2{=}3\).
-\end{itemize}
-
-\textbf{Step 4 — Recursive DFS.}
-Both components are single vertices; their local DFS numbers are trivially 1.
-
-\textbf{Step 5 — Merge via prefix sums.}
-Interleaved layout: \(s_0\), \(\text{block}(s_0){=}\emptyset\), \(s_1\), \(\text{block}(s_1){=}\{4\}\), \(s_2\), \(\text{block}(s_2){=}\{5\}\).
-Sizes: \([1,0,1,1,1,1]\).  Exclusive prefix sums give start offsets \([0,1,1,2,3,4]\).
-Adding 1 for one-based numbering:
-\[
-    dfs[1]=1,\quad dfs[2]=2,\quad dfs[4]=3,\quad dfs[3]=4,\quad dfs[5]=5.
-\]
-
-\textbf{Step 6 — Edge classification.}
-The global DFS tree edges are \(1\text{--}2,\ 2\text{--}3,\ 2\text{--}4,\ 3\text{--}5\).
-The remaining edge \(1\text{--}5\) is non-tree.
-Subtree of vertex 1: interval \([1,5]\).  Since \(dfs[5]=5 \in [1,5]\), vertex 5 is a descendant of 1.
-Edge \(1\text{--}5\) is a \emph{forward edge} (ancestor to descendant) --- valid for an undirected DFS tree.
-\end{ppexample}
 
 \section{Putting the Pieces Together}
 \label{sec:lec26-putting-together}
@@ -751,34 +691,18 @@ It isolates that dependency into a spine and then parallelizes the subproblems h
 \subsection{Complexity View}
 
 Let \(m = |E|\), \(n = |V|\), and \(p\) be the number of processors.
-The table below summarises the key steps under a CREW PRAM model.
+The exact bounds depend on the implementation choices, but the main costs are:
 
-\begin{center}
-\renewcommand{\arraystretch}{1.3}
-\begin{tabular}{lll}
-\hline
-\textbf{Step} & \textbf{Work} & \textbf{Span} \\
-\hline
-Parallel edge sort        & \(O(m \log m)\) & \(O(\log^2 m)\) \\
-Borůvka spanning tree     & \(O(m \log n)\) & \(O(\log^2 n)\) \\
-Euler tour construction   & \(O(n)\)        & \(O(1)\)        \\
-List ranking              & \(O(n)\)        & \(O(\log n)\)   \\
-Off-spine component label & \(O(n)\)        & \(O(\log n)\)   \\
-Deepest attachment scan   & \(O(m)\)        & \(O(\log m)\)   \\
-Merge via prefix sums     & \(O(n)\)        & \(O(\log n)\)   \\
-Edge classification       & \(O(m)\)        & \(O(1)\)        \\
-\hline
-\textbf{Total}            & \(O(m \log n)\) & \(O(\log^2 n)\) \\
-\hline
-\end{tabular}
-\end{center}
+\begin{itemize}
+    \item sorting or selecting edges for the spanning-tree stage,
+    \item \(O(\log n)\)-style pointer-jumping phases for components/list ranking under idealized parallel models,
+    \item recursive work over disjoint hanging components,
+    \item prefix-sum work for merge numbering,
+    \item edge-parallel interval tests for verification.
+\end{itemize}
 
-\begin{ppnote}
-\ The \(O(\log^2 n)\) span arises from \(O(\log n)\) Borůvka rounds each requiring an \(O(\log n)\)-span
-sorting or reduction step.
-On practical shared-memory machines the dominant cost is edge sorting;
-pointer jumping converges quickly in practice even when the worst-case bound is \(O(\log n)\) rounds.
-\end{ppnote}
+The work should remain near-linear or sorting-dominated for a practical implementation.
+The span depends heavily on how balanced the spine decomposition is.
 
 \begin{pppitfall}
 \ Do not judge a parallel graph algorithm only by the number of processors it uses in one step.
@@ -821,29 +745,6 @@ The critical question is whether the algorithm repeatedly creates balanced indep
   \ppexercise{Given \(dfs[u]=4\), \(size[u]=6\), \(dfs[v]=8\), and \(size[v]=2\), classify edge \((u,v)\).}
 
   \textbf{Answer:} The interval of \(u\) is \([4,9]\), and \(dfs[v]=8\) lies inside it. Thus \(v\) is a descendant of \(u\), so the edge is ancestor-to-descendant from \(u\)'s perspective.
-
-  \ppexercise{In the Borůvka algorithm, components \(C_1\) and \(C_2\) both select edge \((A,B)\) as their cheapest outgoing edge. What goes wrong without deduplication, and how does deduplication fix it?}
-
-  \textbf{Answer:} Without deduplication, \((A,B)\) is inserted twice into the spanning forest.
-  This either creates a multi-edge (if insertion is unconditional) or, when combined with union--find, may trigger an extra union call on already-merged components---breaking the invariant that selected edges connect distinct components.
-  Deduplication removes duplicate edge references before insertion, so each edge is added at most once.
-
-  \ppexercise{Construct the Euler tour next pointers for the path \(1\text{--}2\text{--}3\) rooted at 1. List all directed arcs and their successors.}
-
-  \textbf{Answer:} The four directed arcs are \(1{\to}2\), \(2{\to}3\), \(3{\to}2\), \(2{\to}1\).
-  Following the next-pointer rules:
-  \(\mathrm{next}(1{\to}2) = 2{\to}3\) (enter 2, first child is 3);
-  \(\mathrm{next}(2{\to}3) = 3{\to}2\) (3 is a leaf, return immediately);
-  \(\mathrm{next}(3{\to}2) = 2{\to}1\) (3 was the last child of 2, return to parent 1);
-  \(\mathrm{next}(2{\to}1) = \mathrm{NIL}\) (1 is the root, tour ends).
-
-  \ppexercise{Suppose the input graph is itself a path \(v_1\text{--}v_2\text{--}\cdots\text{--}v_n\). What spine does the algorithm choose, and how much parallel speedup does the divide-and-conquer achieve?}
-
-  \textbf{Answer:} The only spanning tree is the path itself.
-  The deepest root-to-leaf path is the entire graph, so the spine \(P = (v_1, v_2, \ldots, v_n)\) covers all vertices.
-  No hanging components remain after removing the spine, so there are no recursive subproblems to run in parallel.
-  The divide-and-conquer achieves no speedup beyond the single prefix-sum step that assigns DFS numbers to the chain.
-  This is the worst case: a path graph exposes a dependence chain of length \(n\), leaving no exploitable parallelism in the decomposition.
 \end{ppexercises}
 
 \section*{References}
@@ -861,5 +762,5 @@ The diagrams in Figures~\ref{fig:lec26-work-pool}, \ref{fig:lec26-spine-componen
 \subsection*{Namit Jain (2023CS10483)}
 Lecture~26 transcription, chapter structuring, explanations, pseudocode, exercises, and manuscript figures.
 
-\subsection*{Apurva Samota (2023CS10585)}
-Complexity analysis table, Borůvka pseudocode, worked example, directed-graph DFS note, and additional exercises.
+\subsection*{Additional Contributors}
+Names and contributions to be added.
